@@ -29,6 +29,7 @@ STALE_DAYS = int(env("STALE_DAYS", "10"))
 LOOKBACK = int(env("LOOKBACK_DAYS", "60"))
 STATUSES = [int(x) for x in env("SOLD_STATUSES", "1,2,3,4").split(",") if x]
 EXCLUDE = [x.strip() for x in env("EXCLUDE_CATEGORIES").split(",") if x.strip()]
+INCLUDE = [x.strip() for x in env("INCLUDE_CATEGORIES").split(",") if x.strip()]
 WAREHOUSES = {x.strip() for x in env("WAREHOUSE_IDS").split(",") if x.strip()} or None
 TZ = ZoneInfo(env("TIMEZONE", "Asia/Tashkent"))
 ANALYZE_TIME = env("ANALYZE_TIME", "06:30")  # Sales Doctor'ga kirish va tahlil vaqti
@@ -136,10 +137,9 @@ async def get_categories(client):
     return [{"id": c["SD_id"], "name": c.get("name") or c["SD_id"]} for c in cats]
 
 
-async def get_excluded(client):
-    """EXCLUDE_CATEGORIES (nom yoki SD_id) bo'yicha chiqarib tashlanadigan tovar ID'lari.
-    Qaytaradi: (tovar_idlar_to'plami, topilmagan_nomlar_ro'yxati)"""
-    if not EXCLUDE:
+async def products_in_categories(client, tokens):
+    """Kategoriyalar (nom yoki SD_id) ichidagi tovar ID'lari. Qaytaradi: (to'plam, topilmaganlar)."""
+    if not tokens:
         return set(), []
     cats = await get_categories(client)
     by_key = {}
@@ -147,7 +147,7 @@ async def get_excluded(client):
         by_key[c["id"].lower()] = c
         by_key[c["name"].strip().lower()] = c
     ids, missing = set(), []
-    for token in EXCLUDE:
+    for token in tokens:
         c = by_key.get(token.lower())
         if not c:
             missing.append(token)
@@ -163,8 +163,15 @@ async def make_report(client):
     t = today()
     last = await get_last_sold(client, t)
     stock = await get_stock(client)
-    excluded, missing = await get_excluded(client)
-    stock = {pid: s for pid, s in stock.items() if pid not in excluded}
+    missing = []
+    if INCLUDE:  # faqat shu kategoriyalar
+        allowed, miss = await products_in_categories(client, INCLUDE)
+        missing += miss
+        stock = {pid: s for pid, s in stock.items() if pid in allowed}
+    if EXCLUDE:  # shu kategoriyalardan tashqari
+        banned, miss = await products_in_categories(client, EXCLUDE)
+        missing += miss
+        stock = {pid: s for pid, s in stock.items() if pid not in banned}
     text = build_message(pick_top(stock, last, t), t)
     if missing:
         text += "\n\n⚠️ Kategoriya topilmadi: " + html.escape(", ".join(missing)) + " (/kategoriya bilan tekshiring)"
@@ -270,11 +277,18 @@ async def cmd_kategoriya(m: Message):
         async with busy:
             cats = await get_categories(RT["sd"])
         ex = {e.lower() for e in EXCLUDE}
-        lines = ["<b>Kategoriyalar</b> (🚫 = hisobotga kirmaydi):"]
+        inc = {e.lower() for e in INCLUDE}
+        lines = ["<b>Kategoriyalar</b> (✅ = hisobotga kiradi, 🚫 = kirmaydi):"]
         for c in sorted(cats, key=lambda c: c["name"].lower()):
-            mark = "🚫 " if (c["id"].lower() in ex or c["name"].strip().lower() in ex) else ""
+            keys = {c["id"].lower(), c["name"].strip().lower()}
+            if keys & ex:
+                mark = "🚫 "
+            elif inc:
+                mark = "✅ " if keys & inc else "🚫 "
+            else:
+                mark = ""
             lines.append(f"{mark}{html.escape(c['name'])}  <code>{html.escape(c['id'])}</code>")
-        lines.append("\nChiqarib tashlash: Render → Environment → EXCLUDE_CATEGORIES = nom1, nom2")
+        lines.append("\nFaqat shular: INCLUDE_CATEGORIES = id1,id2 · Chiqarish: EXCLUDE_CATEGORIES = id1,id2")
         await m.answer("\n".join(lines), parse_mode=ParseMode.HTML)
     except Exception as e:
         log.exception("kategoriya")
