@@ -109,9 +109,9 @@ def fmt_qty(q):
 
 def advice(c):
     if c["days"] is None:
-        return f"{LOOKBACK} kunda umuman sotilmagan — yangi tovar sifatida taklif qiling yoki aksiya qo'ying"
+        return f"{LOOKBACK} kunda umuman sotilmagan — har bir mijozga taklif qiling"
     if c["days"] >= 30:
-        return "juda uzoq turib qolgan — chegirma yoki boshqa tovar bilan to'plam qilib soting"
+        return "uzoq turib qolgan — birinchi navbatda sotishga harakat qiling"
     return "mijozlarga birinchi navbatda taklif qiling"
 
 
