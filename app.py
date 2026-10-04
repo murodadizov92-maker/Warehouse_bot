@@ -145,7 +145,7 @@ async def fresh_report(client):
 
 async def send_report(bot, client, chat_id, thread_id=None):
     """/sklad buyrug'i uchun: hozirning o'zida yangidan hisoblab yuboradi."""
-    await bot.send_message(chat_id, await fresh_report(client), message_thread_id=thread_id)
+    await bot.send_message(chat_id, await fresh_report(client), message_thread_id=thread_id, parse_mode=ParseMode.HTML)
 
 
 async def do_analyze(client):
@@ -166,12 +166,12 @@ async def do_send(bot, client, chat_id, thread_id):
     try:
         cache = state["cache"]
         text = cache[1] if cache and cache[0] == today() else await fresh_report(client)
-        await bot.send_message(chat_id, text, message_thread_id=thread_id)
+        await bot.send_message(chat_id, text, message_thread_id=thread_id, parse_mode=ParseMode.HTML)
         state["last_sent"] = today()
     except Exception:
         log.exception("Hisobot yuborilmadi")
         try:
-            await bot.send_message(chat_id, "❌ Bugungi sklad tahlilida xato chiqdi.", message_thread_id=thread_id)
+            await bot.send_message(chat_id, "❌ Bugungi sklad tahlilida xato chiqdi.", message_thread_id=thread_id, parse_mode=ParseMode.HTML)
         except Exception:
             pass
 
@@ -227,7 +227,7 @@ RT = {}  # bot va client main() da to'ldiriladi
 
 @dp.message(Command("id"))
 async def cmd_id(m: Message):
-    await m.answer(f"Chat ID: <code>{m.chat.id}</code>\nTopik ID: <code>{m.message_thread_id}</code>")
+    await m.answer(f"Chat ID: <code>{m.chat.id}</code>\nTopik ID: <code>{m.message_thread_id}</code>", parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("sklad"))
@@ -237,7 +237,7 @@ async def cmd_sklad(m: Message):
         await send_report(RT["bot"], RT["sd"], m.chat.id, m.message_thread_id)
     except Exception as e:
         log.exception("sklad")
-        await m.answer(f"❌ Xato: {e}")
+        await m.answer(f"❌ Xato: {html.escape(str(e))}", parse_mode=ParseMode.HTML)
 
 
 # ------------------------------------------------------------ veb-server (UptimeRobot uchun)
