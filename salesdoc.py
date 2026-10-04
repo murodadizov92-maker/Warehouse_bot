@@ -28,7 +28,13 @@ class SalesDocClient:
     async def _post(self, body):
         if self._session is None:
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=120)
+                timeout=aiohttp.ClientTimeout(total=120),
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
             )
         async with self._session.post(self.url, json=body) as resp:
             text = await resp.text()
