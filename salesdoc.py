@@ -1,5 +1,6 @@
 """Sales Doctor API v2 klienti (https://{domain}/api/v2, hamma so'rov POST)."""
 import asyncio
+import json
 import logging
 
 import aiohttp
@@ -30,7 +31,14 @@ class SalesDocClient:
                 timeout=aiohttp.ClientTimeout(total=120)
             )
         async with self._session.post(self.url, json=body) as resp:
-            return await resp.json(content_type=None)
+            text = await resp.text()
+            try:
+                return json.loads(text)
+            except ValueError:
+                snippet = text[:200].replace("\n", " ")
+                raise SalesDocError(
+                    f"Sales Doctor JSON qaytarmadi (HTTP {resp.status}, {self.url}): {snippet!r}"
+                )
 
     async def login(self):
         data = await self._post(
