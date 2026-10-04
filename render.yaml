@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: sklad-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: BOT_TOKEN
+        sync: false
+      - key: GROUP_CHAT_ID
+        sync: false
+      - key: TOPIC_ID
+        sync: false
+      - key: SALESDOC_DOMAIN
+        value: aslbarakadzk.salesdoc.io
+      - key: SALESDOC_LOGIN
+        sync: false
+      - key: SALESDOC_PASSWORD
+        sync: false
