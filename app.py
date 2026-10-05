@@ -26,6 +26,9 @@ def env(name, default=""):
 
 TOP_N = int(env("TOP_N", "10"))
 STALE_DAYS = int(env("STALE_DAYS", "10"))
+OVERSTOCK_DAYS = int(env("OVERSTOCK_DAYS", "15"))  # zaxira shuncha kundan ko'p yetsa = ko'payib ketgan
+OVERSTOCK_N = int(env("OVERSTOCK_N", "5"))
+TOTAL_N = int(env("TOTAL_N", "15"))  # xabardagi jami tovar soni (sotilmagan + ko'payib ketgan)
 LOOKBACK = int(env("LOOKBACK_DAYS", "60"))
 STATUSES = [int(x) for x in env("SOLD_STATUSES", "1,2,3,4").split(",") if x]
 EXCLUDE = [x.strip() for x in env("EXCLUDE_CATEGORIES").split(",") if x.strip()]
@@ -68,7 +71,8 @@ async def get_stock(client):
 
 
 async def get_last_sold(client, t):
-    last = {}
+    """Qaytaradi: (oxirgi sotilgan sana, davr ichida sotilgan miqdor) — tovar ID bo'yicha."""
+    last, sold = {}, {}
     cur = t - dt.timedelta(days=LOOKBACK)
     while cur <= t:
         end = min(cur + dt.timedelta(days=6), t)
@@ -82,10 +86,13 @@ async def get_last_sold(client, t):
             day = (o.get("dateDocument") or o.get("dateCreate") or "")[:10]
             for line in o.get("orderProducts") or []:
                 pid = (line.get("product") or {}).get("SD_id")
-                if pid and day and (line.get("quantity") or 0) > 0 and day > last.get(pid, ""):
-                    last[pid] = day
+                qty = float(line.get("quantity") or 0)
+                if pid and day and qty > 0:
+                    sold[pid] = sold.get(pid, 0.0) + qty
+                    if day > last.get(pid, ""):
+                        last[pid] = day
         cur = end + dt.timedelta(days=1)
-    return last
+    return last, sold
 
 
 def pick_top(stock, last_sold, t):
@@ -97,10 +104,26 @@ def pick_top(stock, last_sold, t):
         ld = last_sold.get(pid)
         days = (t - dt.date.fromisoformat(ld)).days if ld else None
         if days is None or days >= STALE_DAYS:
-            cands.append({"name": s["name"], "qty": s["qty"], "days": days,
+            cands.append({"id": pid, "name": s["name"], "qty": s["qty"], "days": days,
                           "score": s["qty"] * (days if days is not None else LOOKBACK)})
     cands.sort(key=lambda c: -c["score"])
     return cands
+
+
+def pick_overstock(stock, sold, skip_ids):
+    """Sotuv tezligiga nisbatan ortiqcha turgan tovarlar: zaxira OVERSTOCK_DAYS dan ko'p kunga yetadi.
+    Ortiqcha miqdor = qoldiq - kunlik sotuv x OVERSTOCK_DAYS (eng kattalari birinchi)."""
+    out = []
+    for pid, s in stock.items():
+        if pid in skip_ids or s["qty"] <= 0 or sold.get(pid, 0) <= 0:
+            continue
+        rate = sold[pid] / LOOKBACK
+        cover = s["qty"] / rate
+        excess = s["qty"] - rate * OVERSTOCK_DAYS
+        if cover >= OVERSTOCK_DAYS and excess > 0:
+            out.append({"name": s["name"], "qty": s["qty"], "rate": rate, "cover": cover, "excess": excess})
+    out.sort(key=lambda c: -c["excess"])
+    return out
 
 
 def fmt_qty(q):
@@ -115,19 +138,48 @@ def advice(c):
     return "mijozlarga birinchi navbatda taklif qiling"
 
 
-def build_message(cands, t):
+def split_counts(n_stale, n_over):
+    """Jami TOTAL_N ta tovar: avval TOP_N ta sotilmagan + OVERSTOCK_N ta ko'payib ketgan.
+    Biri yetmasa, qolgan joyni ikkinchisidan to'ldiradi."""
+    s = min(n_stale, TOP_N)
+    o = min(n_over, OVERSTOCK_N)
+    rem = TOTAL_N - s - o
+    if rem > 0:
+        add = min(rem, n_stale - s)
+        s += add
+        rem -= add
+    if rem > 0:
+        o += min(rem, n_over - o)
+    return s, o
+
+
+def build_message(cands, t, over=None):
+    over = over or []
     never = sum(1 for c in cands if c["days"] is None)
     head = (f"📦 <b>Sklad tahlili — {t:%d.%m.%Y}</b>\n"
             f"{STALE_DAYS}+ kun sotilmagan tovar: <b>{len(cands)} ta</b> "
             f"({LOOKBACK} kunda umuman sotilmagan: {never} ta).\n")
-    if not cands:
+    if not cands and not over:
         return head + "\n✅ Hamma tovar aylanmoqda, bugun alohida ro'yxat yo'q."
-    lines = [head, f"<b>Bugungi eng muhim {min(TOP_N, len(cands))} ta tovar:</b>\n"]
-    for n, c in enumerate(cands[:TOP_N], 1):
-        sold = "umuman sotilmagan" if c["days"] is None else f"{c['days']} kun sotilmagan"
-        lines.append(f"<b>{n}. {html.escape(c['name'])}</b>\n"
-                     f"   Ostatka: <b>{fmt_qty(c['qty'])}</b> · {sold}\n"
-                     f"   💡 {advice(c)}\n")
+    n_s, n_o = split_counts(len(cands), len(over))
+    lines = [head + f"Bugungi ro'yxat: <b>{n_s + n_o} ta</b> tovar.\n"]
+    k = 0
+    if n_s:
+        lines.append(f"<b>🕒 Uzoq vaqt sotilmagan ({n_s} ta):</b>\n")
+        for c in cands[:n_s]:
+            k += 1
+            sold = "umuman sotilmagan" if c["days"] is None else f"{c['days']} kun sotilmagan"
+            lines.append(f"<b>{k}. {html.escape(c['name'])}</b>\n"
+                         f"   Ostatka: <b>{fmt_qty(c['qty'])}</b> · {sold}\n"
+                         f"   💡 {advice(c)}\n")
+    if n_o:
+        lines.append(f"<b>📈 Ko'payib ketgan ({n_o} ta)</b> — zaxira {OVERSTOCK_DAYS}+ kunga yetadi:\n")
+        for c in over[:n_o]:
+            k += 1
+            lines.append(f"<b>{k}. {html.escape(c['name'])}</b>\n"
+                         f"   Ostatka: <b>{fmt_qty(c['qty'])}</b> · kuniga ~{c['rate']:.1f} sotiladi · "
+                         f"zaxira ~{int(c['cover'])} kunga yetadi\n"
+                         f"   💡 zaxira ko'p — shu tovarni ko'proq sotishga harakat qiling\n")
     lines.append(f"📣 <b>Buyruq:</b> {html.escape(AGENT_NOTE)}")
     return "\n".join(lines)
 
@@ -161,7 +213,7 @@ async def products_in_categories(client, tokens):
 
 async def make_report(client):
     t = today()
-    last = await get_last_sold(client, t)
+    last, sold = await get_last_sold(client, t)
     stock = await get_stock(client)
     missing = []
     if INCLUDE:  # faqat shu kategoriyalar
@@ -172,13 +224,32 @@ async def make_report(client):
         banned, miss = await products_in_categories(client, EXCLUDE)
         missing += miss
         stock = {pid: s for pid, s in stock.items() if pid not in banned}
-    text = build_message(pick_top(stock, last, t), t)
+    cands = pick_top(stock, last, t)
+    over = pick_overstock(stock, sold, {c["id"] for c in cands})
+    text = build_message(cands, t, over)
     if missing:
         text += "\n\n⚠️ Kategoriya topilmadi: " + html.escape(", ".join(missing)) + " (/kategoriya bilan tekshiring)"
     return text
 
 
 # ------------------------------------------------------------ yuborish
+def split_text(text, limit=3900):
+    parts, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > limit and cur:
+            parts.append(cur)
+            cur = ""
+        cur += line + "\n"
+    if cur.strip():
+        parts.append(cur)
+    return parts
+
+
+async def post(bot, chat_id, text, thread_id=None):
+    for part in split_text(text):
+        await bot.send_message(chat_id, part, message_thread_id=thread_id, parse_mode=ParseMode.HTML)
+
+
 async def fresh_report(client):
     async with busy:
         return await make_report(client)
@@ -186,7 +257,7 @@ async def fresh_report(client):
 
 async def send_report(bot, client, chat_id, thread_id=None):
     """/sklad buyrug'i uchun: hozirning o'zida yangidan hisoblab yuboradi."""
-    await bot.send_message(chat_id, await fresh_report(client), message_thread_id=thread_id, parse_mode=ParseMode.HTML)
+    await post(bot, chat_id, await fresh_report(client), thread_id)
 
 
 async def do_analyze(client):
@@ -207,7 +278,7 @@ async def do_send(bot, client, chat_id, thread_id):
     try:
         cache = state["cache"]
         text = cache[1] if cache and cache[0] == today() else await fresh_report(client)
-        await bot.send_message(chat_id, text, message_thread_id=thread_id, parse_mode=ParseMode.HTML)
+        await post(bot, chat_id, text, thread_id)
         state["last_sent"] = today()
     except Exception:
         log.exception("Hisobot yuborilmadi")
