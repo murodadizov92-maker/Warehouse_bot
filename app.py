@@ -4,6 +4,7 @@ Baza kerak emas: har safar sotuv tarixini Sales Doctor'dan qayta o'qiydi."""
 import asyncio
 import datetime as dt
 import html
+import json
 import logging
 import os
 from zoneinfo import ZoneInfo
@@ -12,7 +13,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from salesdoc import SalesDocClient
@@ -28,6 +29,8 @@ TOP_N = int(env("TOP_N", "10"))
 STALE_DAYS = int(env("STALE_DAYS", "10"))
 OVERSTOCK_DAYS = int(env("OVERSTOCK_DAYS", "15"))  # zaxira shuncha kundan ko'p yetsa = ko'payib ketgan
 OVERSTOCK_N = int(env("OVERSTOCK_N", "5"))
+COVER_CAP = int(env("COVER_CAP", "100"))  # zaxira shundan ko'p bo'lsa "100+ kun" deb yoziladi
+TREND_PCT = float(env("TREND_PCT", "20"))  # hafta/oy kunlik sotuvi shu foizdan ko'p farq qilsa 📈/📉
 TOTAL_N = int(env("TOTAL_N", "15"))  # xabardagi jami tovar soni (sotilmagan + ko'payib ketgan)
 LOOKBACK = int(env("LOOKBACK_DAYS", "60"))
 STATUSES = [int(x) for x in env("SOLD_STATUSES", "1,2,3,4").split(",") if x]
@@ -70,9 +73,9 @@ async def get_stock(client):
     return stock
 
 
-async def get_last_sold(client, t):
-    """Qaytaradi: (oxirgi sotilgan sana, davr ichida sotilgan miqdor) — tovar ID bo'yicha."""
-    last, sold = {}, {}
+async def get_sales(client, t):
+    """Tovar bo'yicha kunlik sotuv: {pid: {'YYYY-MM-DD': miqdor}} (oxirgi LOOKBACK kun)."""
+    daily = {}
     cur = t - dt.timedelta(days=LOOKBACK)
     while cur <= t:
         end = min(cur + dt.timedelta(days=6), t)
@@ -88,11 +91,27 @@ async def get_last_sold(client, t):
                 pid = (line.get("product") or {}).get("SD_id")
                 qty = float(line.get("quantity") or 0)
                 if pid and day and qty > 0:
-                    sold[pid] = sold.get(pid, 0.0) + qty
-                    if day > last.get(pid, ""):
-                        last[pid] = day
+                    d = daily.setdefault(pid, {})
+                    d[day] = d.get(day, 0.0) + qty
         cur = end + dt.timedelta(days=1)
-    return last, sold
+    return daily
+
+
+def sales_stats(daily, t):
+    """Qaytaradi: oxirgi sotilgan sana, oxirgi 7 kun va oxirgi 30 kunlik sotuv (bugun hisobga olinmaydi)."""
+    d7 = t - dt.timedelta(days=7)
+    d30 = t - dt.timedelta(days=30)
+    last, week, month = {}, {}, {}
+    for pid, days in daily.items():
+        for day, q in days.items():
+            if day > last.get(pid, ""):
+                last[pid] = day
+            d = dt.date.fromisoformat(day)
+            if d30 <= d < t:
+                month[pid] = month.get(pid, 0.0) + q
+                if d >= d7:
+                    week[pid] = week.get(pid, 0.0) + q
+    return last, week, month
 
 
 def pick_top(stock, last_sold, t):
@@ -110,18 +129,34 @@ def pick_top(stock, last_sold, t):
     return cands
 
 
-def pick_overstock(stock, sold, skip_ids):
-    """Sotuv tezligiga nisbatan ortiqcha turgan tovarlar: zaxira OVERSTOCK_DAYS dan ko'p kunga yetadi.
-    Ortiqcha miqdor = qoldiq - kunlik sotuv x OVERSTOCK_DAYS (eng kattalari birinchi)."""
+def trend_mark(rate_w, rate_m):
+    if rate_m <= 0:
+        return "📈" if rate_w > 0 else "➖"
+    ratio = rate_w / rate_m
+    if ratio > 1 + TREND_PCT / 100:
+        return "📈"
+    if ratio < 1 - TREND_PCT / 100:
+        return "📉"
+    return "➖"
+
+
+def pick_overstock(stock, week, month, skip_ids):
+    """Zaxira kuni = ostatka / max(oxirgi 7 kun kunlik sotuvi, oxirgi 30 kun kunlik sotuvi).
+    Zaxira OVERSTOCK_DAYS dan ko'p kunga yetsa — ko'payib ketgan. Eng katta ortiqcha birinchi."""
     out = []
     for pid, s in stock.items():
-        if pid in skip_ids or s["qty"] <= 0 or sold.get(pid, 0) <= 0:
+        if pid in skip_ids or s["qty"] <= 0:
             continue
-        rate = sold[pid] / LOOKBACK
+        w, m = week.get(pid, 0.0), month.get(pid, 0.0)
+        rate_w, rate_m = w / 7, m / 30
+        rate = max(rate_w, rate_m)
+        if rate <= 0:
+            continue
         cover = s["qty"] / rate
         excess = s["qty"] - rate * OVERSTOCK_DAYS
         if cover >= OVERSTOCK_DAYS and excess > 0:
-            out.append({"name": s["name"], "qty": s["qty"], "rate": rate, "cover": cover, "excess": excess})
+            out.append({"name": s["name"], "qty": s["qty"], "week": w, "month": m,
+                        "cover": cover, "excess": excess, "trend": trend_mark(rate_w, rate_m)})
     out.sort(key=lambda c: -c["excess"])
     return out
 
@@ -176,9 +211,11 @@ def build_message(cands, t, over=None):
         lines.append(f"<b>📈 Ko'payib ketgan ({n_o} ta)</b> — zaxira {OVERSTOCK_DAYS}+ kunga yetadi:\n")
         for c in over[:n_o]:
             k += 1
+            cover = f"{COVER_CAP}+" if c["cover"] >= COVER_CAP else f"~{round(c['cover'])}"
             lines.append(f"<b>{k}. {html.escape(c['name'])}</b>\n"
-                         f"   Ostatka: <b>{fmt_qty(c['qty'])}</b> · kuniga ~{c['rate']:.1f} sotiladi · "
-                         f"zaxira ~{int(c['cover'])} kunga yetadi\n"
+                         f"   Ostatka: <b>{fmt_qty(c['qty'])}</b> · Oy: {fmt_qty(c['month'])} ta · "
+                         f"Hafta: {fmt_qty(c['week'])} ta {c['trend']}\n"
+                         f"   Zaxira {cover} kunga yetadi\n"
                          f"   💡 zaxira ko'p — shu tovarni ko'proq sotishga harakat qiling\n")
     lines.append(f"📣 <b>Buyruq:</b> {html.escape(AGENT_NOTE)}")
     return "\n".join(lines)
@@ -213,7 +250,8 @@ async def products_in_categories(client, tokens):
 
 async def make_report(client):
     t = today()
-    last, sold = await get_last_sold(client, t)
+    daily = await get_sales(client, t)
+    last, week, month = sales_stats(daily, t)
     stock = await get_stock(client)
     missing = []
     if INCLUDE:  # faqat shu kategoriyalar
@@ -225,7 +263,7 @@ async def make_report(client):
         missing += miss
         stock = {pid: s for pid, s in stock.items() if pid not in banned}
     cands = pick_top(stock, last, t)
-    over = pick_overstock(stock, sold, {c["id"] for c in cands})
+    over = pick_overstock(stock, week, month, {c["id"] for c in cands})
     text = build_message(cands, t, over)
     if missing:
         text += "\n\n⚠️ Kategoriya topilmadi: " + html.escape(", ".join(missing)) + " (/kategoriya bilan tekshiring)"
@@ -363,6 +401,69 @@ async def cmd_kategoriya(m: Message):
         await m.answer("\n".join(lines), parse_mode=ParseMode.HTML)
     except Exception as e:
         log.exception("kategoriya")
+        await m.answer(f"❌ Xato: {html.escape(str(e))}", parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("tekshir"))
+async def cmd_tekshir(m: Message, command: CommandObject):
+    """Bitta tovar bo'yicha xom raqamlarni ko'rsatadi (birlik/hisob xatosini topish uchun)."""
+    q = (command.args or "").strip().lower()
+    if not q:
+        await m.answer("Misol: /tekshir ШАРҚОНА")
+        return
+    await m.answer("⏳ Tekshiryapman...")
+    try:
+        async with busy:
+            client, t = RT["sd"], today()
+            found = {}
+            for w in await client.paginate("getStock", {}, "warehouse"):
+                for p in w.get("products") or []:
+                    if q in (p.get("name") or "").lower():
+                        f = found.setdefault(p["SD_id"], {"name": p.get("name"), "wh": [], "raw": p})
+                        f["wh"].append(f"{w.get('SD_id')}: {p.get('quantity')}")
+            if not found:
+                await m.answer("Bunday tovar skladdan topilmadi.")
+                return
+            pid, info = next(iter(found.items()))
+            d7 = t - dt.timedelta(days=7)
+            wk = mo = 0.0
+            samples = []
+            cur = t - dt.timedelta(days=30)
+            while cur <= t:
+                end = min(cur + dt.timedelta(days=6), t)
+                orders = await client.paginate(
+                    "getOrder",
+                    {"filter": {"agent": "all", "status": STATUSES,
+                                "period": {"date": {"from": str(cur), "to": str(end)}}}},
+                    "order",
+                )
+                for o in orders:
+                    day = (o.get("dateDocument") or o.get("dateCreate") or "")[:10]
+                    for line in o.get("orderProducts") or []:
+                        if (line.get("product") or {}).get("SD_id") != pid:
+                            continue
+                        qty = float(line.get("quantity") or 0)
+                        if qty > 0 and day:
+                            d = dt.date.fromisoformat(day)
+                            if d < t:
+                                mo += qty
+                                if d >= d7:
+                                    wk += qty
+                            if len(samples) < 2:
+                                samples.append(line)
+                cur = end + dt.timedelta(days=1)
+        raw_stock = json.dumps(info["raw"], ensure_ascii=False)[:600]
+        raw_line = json.dumps(samples, ensure_ascii=False)[:900]
+        await m.answer(
+            f"<b>{html.escape(info['name'] or '')}</b>\n"
+            f"Sklad ostatkasi: {html.escape('; '.join(info['wh']))}\n"
+            f"Sotuv: 7 kunda <b>{fmt_qty(wk)}</b> · 30 kunda <b>{fmt_qty(mo)}</b>\n\n"
+            f"Sklad yozuvi:\n<code>{html.escape(raw_stock)}</code>\n\n"
+            f"Buyurtma qatori:\n<code>{html.escape(raw_line)}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        log.exception("tekshir")
         await m.answer(f"❌ Xato: {html.escape(str(e))}", parse_mode=ParseMode.HTML)
 
 
