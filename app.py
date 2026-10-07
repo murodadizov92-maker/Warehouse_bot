@@ -89,7 +89,7 @@ async def get_sales(client, t):
             day = (o.get("dateDocument") or o.get("dateCreate") or "")[:10]
             for line in o.get("orderProducts") or []:
                 pid = (line.get("product") or {}).get("SD_id")
-                qty = float(line.get("quantity") or 0)
+                qty = float(line.get("quantity") or 0) - float(line.get("returned") or 0)  # vozvrat ayriladi
                 if pid and day and qty > 0:
                     d = daily.setdefault(pid, {})
                     d[day] = d.get(day, 0.0) + qty
@@ -442,7 +442,7 @@ async def cmd_tekshir(m: Message, command: CommandObject):
                     for line in o.get("orderProducts") or []:
                         if (line.get("product") or {}).get("SD_id") != pid:
                             continue
-                        qty = float(line.get("quantity") or 0)
+                        qty = float(line.get("quantity") or 0) - float(line.get("returned") or 0)  # vozvrat ayriladi
                         if qty > 0 and day:
                             d = dt.date.fromisoformat(day)
                             if d < t:
