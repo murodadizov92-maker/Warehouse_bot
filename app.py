@@ -213,8 +213,8 @@ def build_message(cands, t, over=None):
             k += 1
             cover = f"{COVER_CAP}+" if c["cover"] >= COVER_CAP else f"~{round(c['cover'])}"
             lines.append(f"<b>{k}. {html.escape(c['name'])}</b>\n"
-                         f"   Ostatka: <b>{fmt_qty(c['qty'])}</b> · Oy: {fmt_qty(c['month'])} ta · "
-                         f"Hafta: {fmt_qty(c['week'])} ta {c['trend']}\n"
+                         f"   Ostatka: <b>{fmt_qty(c['qty'])}</b> · Oy: {fmt_qty(c['month'])} sotildi · "
+                         f"Hafta: {fmt_qty(c['week'])} sotildi {c['trend']}\n"
                          f"   Zaxira {cover} kunga yetadi\n"
                          f"   💡 zaxira ko'p — shu tovarni ko'proq sotishga harakat qiling\n")
     lines.append(f"📣 <b>Buyruq:</b> {html.escape(AGENT_NOTE)}")
