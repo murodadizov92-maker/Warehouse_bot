@@ -141,24 +141,33 @@ def trend_mark(rate_w, rate_m):
 
 
 def pick_overstock(stock, week, month, skip_ids):
-    """Zaxira kuni = ostatka / max(oxirgi 7 kun kunlik sotuvi, oxirgi 30 kun kunlik sotuvi).
-    Zaxira OVERSTOCK_DAYS dan ko'p kunga yetsa — ko'payib ketgan. Eng katta ortiqcha birinchi."""
-    out = []
+    """Zaxirasi ko'p tovarlar. Zaxira kuni = ostatka / max(oxirgi 7 kun, oxirgi 30 kun kunlik sotuvi).
+    1) 'strong': zaxira OVERSTOCK_DAYS dan ko'p yetadi (eng katta ortiqcha birinchi);
+    2) qolganlari zaxira kuni kattasidan boshlab, so'ng oyda sotuvi yo'qlar (ostatka kattasi birinchi).
+    Shunda kunlik jami TOTAL_N ta tovar har doim to'ladi (agar skladda yetarli tovar bo'lsa)."""
+    strong, weak, nosales = [], [], []
     for pid, s in stock.items():
         if pid in skip_ids or s["qty"] <= 0:
             continue
         w, m = week.get(pid, 0.0), month.get(pid, 0.0)
         rate_w, rate_m = w / 7, m / 30
         rate = max(rate_w, rate_m)
+        row = {"name": s["name"], "qty": s["qty"], "week": w, "month": m,
+               "trend": trend_mark(rate_w, rate_m), "cover": None, "excess": 0.0, "strong": False}
         if rate <= 0:
+            nosales.append(row)
             continue
-        cover = s["qty"] / rate
-        excess = s["qty"] - rate * OVERSTOCK_DAYS
-        if cover >= OVERSTOCK_DAYS and excess > 0:
-            out.append({"name": s["name"], "qty": s["qty"], "week": w, "month": m,
-                        "cover": cover, "excess": excess, "trend": trend_mark(rate_w, rate_m)})
-    out.sort(key=lambda c: -c["excess"])
-    return out
+        row["cover"] = s["qty"] / rate
+        row["excess"] = s["qty"] - rate * OVERSTOCK_DAYS
+        if row["cover"] >= OVERSTOCK_DAYS and row["excess"] > 0:
+            row["strong"] = True
+            strong.append(row)
+        else:
+            weak.append(row)
+    strong.sort(key=lambda c: -c["excess"])
+    weak.sort(key=lambda c: -c["cover"])
+    nosales.sort(key=lambda c: -c["qty"])
+    return strong + weak + nosales
 
 
 def fmt_qty(q):
@@ -208,15 +217,15 @@ def build_message(cands, t, over=None):
                          f"   Ostatka: <b>{fmt_qty(c['qty'])}</b> · {sold}\n"
                          f"   💡 {advice(c)}\n")
     if n_o:
-        lines.append(f"<b>📈 Ko'payib ketgan ({n_o} ta)</b> — zaxira {OVERSTOCK_DAYS}+ kunga yetadi:\n")
+        lines.append(f"<b>📈 Zaxirasi ko'p tovarlar ({n_o} ta):</b>\n")
         for c in over[:n_o]:
             k += 1
-            cover = f"{COVER_CAP}+" if c["cover"] >= COVER_CAP else f"~{round(c['cover'])}"
+            tip = ("Zaxira miqdori ko'p — shu tovarni ko'proq sotishga harakat qiling" if c["strong"]
+                   else "Ostatka bor — shu tovarni ham mijozlarga taklif qiling")
             lines.append(f"<b>{k}. {html.escape(c['name'])}</b>\n"
                          f"   Ostatka: <b>{fmt_qty(c['qty'])}</b> · Oy: {fmt_qty(c['month'])} sotildi · "
                          f"Hafta: {fmt_qty(c['week'])} sotildi {c['trend']}\n"
-                         f"   Zaxira {cover} kunga yetadi\n"
-                         f"   💡 zaxira ko'p — shu tovarni ko'proq sotishga harakat qiling\n")
+                         f"   💡 {tip}\n")
     lines.append(f"📣 <b>Buyruq:</b> {html.escape(AGENT_NOTE)}")
     return "\n".join(lines)
 
